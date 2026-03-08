@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitepress'
+import { withMermaid } from 'vitepress-plugin-mermaid'
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   base: '/docs-link2pay/',
   ignoreDeadLinks: true,
   title: 'Link2Pay',
@@ -162,5 +163,13 @@ export default defineConfig({
       dark: 'github-dark'
     },
     lineNumbers: true
+  },
+
+  mermaid: {
+    // Mermaid configuration options
+  },
+
+  mermaidPlugin: {
+    class: 'mermaid'
   }
-})
+}))

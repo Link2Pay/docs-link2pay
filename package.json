@@ -20,7 +20,9 @@
   "author": "Link2Pay",
   "license": "MIT",
   "devDependencies": {
+    "mermaid": "^11.12.3",
     "vitepress": "^1.0.0",
+    "vitepress-plugin-mermaid": "^2.0.17",
     "vue": "^3.4.0"
   },
   "engines": {
