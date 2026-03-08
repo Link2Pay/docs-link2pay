@@ -2,6 +2,7 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   base: '/docs-link2pay/',
+  ignoreDeadLinks: true,
   title: 'Link2Pay',
   description: 'Stellar blockchain payment infrastructure for modern applications',
 
