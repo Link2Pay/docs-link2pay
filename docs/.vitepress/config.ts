@@ -4,6 +4,7 @@ import { withMermaid } from 'vitepress-plugin-mermaid'
 export default withMermaid(defineConfig({
   base: '/docs-link2pay/',
   ignoreDeadLinks: true,
+  cleanUrls: true,
   title: 'Link2Pay',
   description: 'Stellar blockchain payment infrastructure for modern applications',
 
