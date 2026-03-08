@@ -900,329 +900,226 @@ const transaction = await server
 
 ## Data Flow
 
-### Complete Payment Flow (End-to-End)
+### Overview: Complete Payment Lifecycle
 
+```mermaid
+graph TB
+    subgraph "Phase 1: Invoice Creation (Off-Chain)"
+        A[Freelancer Creates Invoice] --> B[React Frontend]
+        B --> C[Express API]
+        C --> D[(PostgreSQL)]
+        D --> E[Invoice DRAFT]
+    end
+
+    subgraph "Phase 2: Send Invoice"
+        E --> F[Mark as PENDING]
+        F --> G[Generate Payment Link]
+        G --> H[Share with Client]
+    end
+
+    subgraph "Phase 3: Client Payment (Hybrid)"
+        H --> I[Client Opens Link]
+        I --> J[Connect Freighter Wallet]
+        J --> K[Backend Builds XDR]
+        K --> L[Freighter Signs TX]
+        L --> M{{Stellar Network}}
+        M --> N[TX Confirmed 3-5s]
+    end
+
+    subgraph "Phase 4: Confirmation (On-Chain → Off-Chain)"
+        N --> O[WatcherService Detects]
+        O --> P[Match by Memo]
+        P --> Q[Validate Amount & Asset]
+        Q --> R[Update Invoice PAID]
+    end
+
+    style M fill:#5f67ee,color:#fff
+    style N fill:#00d4aa,color:#fff
+    style R fill:#00d4aa,color:#fff
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 1: INVOICE CREATION (Off-Chain)                                       │
-└─────────────────────────────────────────────────────────────────────────────┘
 
-[Freelancer Browser]
-      │
-      │ 1. Fill invoice form
-      │    (client name, items, amount, currency)
-      │
-      ▼
-[React Frontend]
-      │
-      │ 2. Validate form (Zod)
-      │    Check: amount > 0, valid email, etc.
-      │
-      ▼
-[POST /api/invoices]
-      │
-      │ 3. Authenticate request
-      │    Headers: x-wallet-address, x-auth-nonce, x-auth-signature
-      │
-      ▼
-[Express Backend - Auth Middleware]
-      │
-      │ 4. Verify ed25519 signature
-      │    - Check nonce valid & not expired
-      │    - Verify signature with wallet's public key
-      │    - Consume nonce (single-use)
-      │
-      ▼
-[Invoice Route Handler]
-      │
-      │ 5. Validate request body (Zod schema)
-      │    - Sanitize inputs
-      │    - Calculate totals (subtotal + tax - discount)
-      │
-      ▼
-[Prisma ORM]
-      │
-      │ 6. Create invoice record
-      │    INSERT INTO invoices (...)
-      │    INSERT INTO line_items (...)
-      │    INSERT INTO invoice_audit_logs (action: CREATED)
-      │
-      ▼
-[PostgreSQL Database]
-      │
-      │ 7. Return invoice with ID
-      │    { id: "clx7k8q9a...", invoiceNumber: "INV-001", status: "DRAFT" }
-      │
-      ▼
-[Frontend - Invoice List]
-      │
-      │ 8. Display invoice in dashboard
-      │    React Query auto-updates cache
-      │
+---
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 2: SEND INVOICE (Off-Chain Status Update)                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+### Phase 1: Invoice Creation Flow
 
-[Freelancer] Click "Send Invoice" button
-      │
-      ▼
-[POST /api/invoices/:id/send]
-      │
-      │ 1. Authenticate (same as above)
-      │ 2. Check invoice status === DRAFT
-      │ 3. Update status to PENDING
-      │ 4. Log audit trail (SENT)
-      │
-      ▼
-[Database]
-      │
-      │ UPDATE invoices SET status = 'PENDING' WHERE id = ...
-      │ INSERT INTO invoice_audit_logs (action: SENT)
-      │
-      ▼
-[Frontend]
-      │
-      │ Generate payment link: https://app.link2pay.dev/pay/clx7k8q9a...
-      │ Freelancer shares link with client (email, Slack, etc.)
-      │
+```mermaid
+sequenceDiagram
+    actor Freelancer
+    participant Frontend as React Frontend
+    participant API as Express API
+    participant Auth as AuthService
+    participant DB as PostgreSQL
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 3: CLIENT PAYMENT (Hybrid: Off-Chain → On-Chain)                      │
-└─────────────────────────────────────────────────────────────────────────────┘
+    Freelancer->>Frontend: Fill invoice form<br/>(client, items, amount)
+    Frontend->>Frontend: Validate form (Zod)<br/>amount > 0, valid email
 
-[Client Browser] Opens payment link
-      │
-      ▼
-[GET /api/invoices/:id] (Public endpoint, no auth)
-      │
-      │ Returns invoice details (excluding sensitive data)
-      │ { id, amount, currency, dueDate, items, ... }
-      │
-      ▼
-[PaymentFlow Component] Displays invoice
-      │
-      │ Client clicks "Pay with Freighter"
-      │
-      ▼
-[POST /api/payments/:id/pay-intent]
-      │
-      │ 1. Get client's wallet address from Freighter
-      │ 2. Request unsigned transaction from backend
-      │
-      ▼
-[StellarService.buildPaymentTransaction()]
-      │
-      │ 3. Fetch payer's sequence number from Horizon API
-      │    GET https://horizon.stellar.org/accounts/GPAYER...
-      │
-      │ 4. Build transaction:
-      │    - Operation: payment
-      │    - Destination: freelancer wallet
-      │    - Amount: invoice total
-      │    - Asset: USDC (or XLM/EURC)
-      │    - Memo: invoice number (for matching)
-      │    - Timeout: 5 minutes
-      │    - Fee: 100 stroops (0.00001 XLM)
-      │
-      │ 5. Return unsigned XDR
-      │
-      ▼
-[Frontend] Receives unsigned XDR
-      │
-      │ 6. Prompt Freighter to sign transaction
-      │    await freighter.signTransaction(xdr, { network: 'TESTNET' })
-      │
-      ▼
-[Freighter Wallet Extension]
-      │
-      │ 7. Show transaction details to user:
-      │    - "Send 100 USDC to GFREELANCER..."
-      │    - "Memo: INV-001"
-      │    - "Fee: 0.00001 XLM"
-      │
-      │ 8. User approves → Signs with private key (ed25519)
-      │    Private key NEVER leaves Freighter
-      │
-      │ 9. Returns signed XDR
-      │
-      ▼
-[POST /api/payments/submit]
-      │
-      │ 10. Backend receives signed XDR
-      │
-      ▼
-[StellarService.submitTransaction()]
-      │
-      │ 11. Parse XDR to validate network
-      │     - Check network passphrase matches invoice
-      │     - Throw error if network mismatch
-      │
-      │ 12. Submit to Stellar Horizon API
-      │     POST https://horizon.stellar.org/transactions
-      │     Body: signed XDR
-      │
-      ▼
-[Stellar Network]
-      │
-      │ 13. Validators consensus (3-5 seconds)
-      │     - Validate signatures
-      │     - Check account balances
-      │     - Execute payment operation
-      │     - Record in ledger
-      │
-      │ 14. Transaction confirmed ✅
-      │     - Transaction hash: abc123...
-      │     - Ledger number: 12345678
-      │     - Funds transferred atomically
-      │
-      ▼
-[Horizon API Response]
-      │
-      │ { hash: "abc123...", ledger: 12345678, successful: true }
-      │
-      ▼
-[Backend] Update invoice status to PROCESSING
-      │
-      │ UPDATE invoices SET status = 'PROCESSING' WHERE id = ...
-      │
-      ▼
-[Frontend] Shows "Processing..." state
-      │
-      │ Client sees: "Payment submitted! Confirming..."
-      │
+    Frontend->>API: POST /api/invoices<br/>Headers: wallet, nonce, signature
 
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 4: PAYMENT CONFIRMATION (On-Chain → Off-Chain)                        │
-└─────────────────────────────────────────────────────────────────────────────┘
+    rect rgb(95, 103, 238, 0.1)
+        Note over API,Auth: Authentication
+        API->>Auth: Verify ed25519 signature
+        Auth->>Auth: Check nonce valid & not expired
+        Auth->>Auth: Verify signature with public key
+        Auth->>Auth: Consume nonce (single-use)
+        Auth-->>API: ✓ Authenticated
+    end
 
-[WatcherService] (Running every 5 seconds)
-      │
-      │ 1. Query database for PENDING/PROCESSING invoices
-      │    SELECT * FROM invoices WHERE status IN ('PENDING', 'PROCESSING')
-      │
-      ▼
-[Database] Returns list of pending invoices
-      │
-      │ [
-      │   { id: "clx7k8q9a...", invoiceNumber: "INV-001",
-      │     freelancerWallet: "GFREELANCER...",
-      │     networkPassphrase: "Public Global...",
-      │     total: 100, currency: "USDC" }
-      │ ]
-      │
-      ▼
-[Watcher] Group by wallet + network
-      │
-      │ Map {
-      │   "GFREELANCER...:Public Global..." => [invoices for this wallet/network]
-      │ }
-      │
-      ▼
-[For each wallet group]
-      │
-      │ 2. Query Horizon API for recent transactions
-      │    GET https://horizon.stellar.org/accounts/GFREELANCER.../transactions
-      │    ?limit=20&order=desc
-      │
-      ▼
-[Horizon API] Returns recent transactions
-      │
-      │ [
-      │   { hash: "abc123...", memo: "INV-001", successful: true, ... },
-      │   { hash: "def456...", memo: "INV-002", successful: true, ... }
-      │ ]
-      │
-      ▼
-[Watcher] Match transactions by memo
-      │
-      │ 3. Find transaction with memo === "INV-001"
-      │    Found: { hash: "abc123...", memo: "INV-001" }
-      │
-      │ 4. Check if already recorded
-      │    SELECT * FROM payments WHERE transactionHash = 'abc123...'
-      │    → Not found, proceed
-      │
-      │ 5. Verify transaction details (double-check)
-      │    GET https://horizon.stellar.org/transactions/abc123...
-      │
-      ▼
-[Horizon API] Returns full transaction details
-      │
-      │ {
-      │   hash: "abc123...",
-      │   ledger: 12345678,
-      │   successful: true,
-      │   memo: "INV-001",
-      │   operations: [{
-      │     type: "payment",
-      │     from: "GPAYER...",
-      │     to: "GFREELANCER...",
-      │     amount: "100.0000000",
-      │     asset_code: "USDC"
-      │   }]
-      │ }
-      │
-      ▼
-[Watcher] Validate payment
-      │
-      │ 6. Check:
-      │    ✅ Destination matches freelancer wallet
-      │    ✅ Asset matches invoice currency (USDC)
-      │    ✅ Amount >= invoice total (100 USDC)
-      │
-      │ 7. All checks passed → Mark as PAID
-      │
-      ▼
-[Prisma Transaction (SERIALIZABLE isolation)]
-      │
-      │ BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-      │
-      │ 8. Update invoice status
-      │    UPDATE invoices SET
-      │      status = 'PAID',
-      │      transactionHash = 'abc123...',
-      │      ledgerNumber = 12345678,
-      │      payerWallet = 'GPAYER...',
-      │      paidAt = '2024-01-15T10:30:00Z'
-      │    WHERE id = 'clx7k8q9a...' AND status != 'PAID';  -- Prevent double-update
-      │
-      │ 9. Create payment record
-      │    INSERT INTO payments (
-      │      invoiceId, transactionHash, ledgerNumber,
-      │      fromWallet, toWallet, amount, asset, status
-      │    ) VALUES (...);
-      │
-      │ 10. Create audit log
-      │     INSERT INTO invoice_audit_logs (
-      │       invoiceId, action, actorWallet, changes
-      │     ) VALUES ('clx7k8q9a...', 'PAID', 'GPAYER...', {...});
-      │
-      │ COMMIT;
-      │
-      ▼
-[Database] Transaction committed ✅
-      │
-      │ Invoice now in PAID state with on-chain proof
-      │
-      ▼
-[Frontend Dashboard] (Next polling cycle)
-      │
-      │ 11. React Query refetches invoices
-      │     GET /api/invoices?status=PAID
-      │
-      │ 12. UI updates automatically
-      │     ✅ "Invoice INV-001 PAID"
-      │     🔗 Transaction hash: abc123...
-      │     📅 Paid at: 2024-01-15 10:30 AM
-      │
-      ▼
-[Freelancer] Sees payment confirmed!
-      │
-      │ Can click transaction hash to view on Stellar Expert:
-      │ https://stellar.expert/explorer/public/tx/abc123...
-      │
+    API->>API: Validate request body (Zod)<br/>Sanitize inputs, calculate totals
+
+    API->>DB: BEGIN TRANSACTION
+    API->>DB: INSERT INTO invoices
+    API->>DB: INSERT INTO line_items
+    API->>DB: INSERT INTO audit_logs<br/>(action: CREATED)
+    API->>DB: COMMIT
+
+    DB-->>API: Invoice created<br/>id: "clx7k...", status: DRAFT
+    API-->>Frontend: 201 Created
+    Frontend->>Frontend: React Query updates cache
+    Frontend-->>Freelancer: Display invoice in dashboard
 ```
+
+---
+
+### Phase 2: Send Invoice Flow
+
+```mermaid
+sequenceDiagram
+    actor Freelancer
+    participant Frontend as React Frontend
+    participant API as Express API
+    participant DB as PostgreSQL
+
+    Freelancer->>Frontend: Click "Send Invoice"
+    Frontend->>API: POST /api/invoices/:id/send<br/>(Authenticated)
+
+    API->>API: Check status === DRAFT
+
+    API->>DB: BEGIN TRANSACTION
+    API->>DB: UPDATE invoices<br/>SET status = 'PENDING'
+    API->>DB: INSERT audit_logs<br/>(action: SENT)
+    API->>DB: COMMIT
+
+    DB-->>API: Status updated
+    API-->>Frontend: 200 OK
+
+    Frontend->>Frontend: Generate payment link<br/>https://app.link2pay.dev/pay/:id
+    Frontend-->>Freelancer: Display shareable link
+
+    Freelancer->>Freelancer: Share link with client<br/>(email, Slack, etc.)
+```
+
+---
+
+### Phase 3: Client Payment Flow (Hybrid: Off-Chain → On-Chain)
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant Browser as Client Browser
+    participant Frontend as React Frontend
+    participant API as Express API
+    participant Freighter as Freighter Wallet
+    participant Stellar as Stellar Network
+    participant Horizon as Horizon API
+
+    Client->>Browser: Open payment link
+    Browser->>API: GET /api/invoices/:id<br/>(Public, no auth)
+    API-->>Browser: Invoice details<br/>(amount, currency, items)
+    Browser-->>Client: Display invoice
+
+    Client->>Browser: Click "Pay with Freighter"
+    Browser->>Freighter: Request wallet address
+    Freighter-->>Browser: GPAYER...
+
+    rect rgb(95, 103, 238, 0.1)
+        Note over Browser,Horizon: Build Unsigned Transaction
+        Browser->>API: POST /payments/:id/pay-intent<br/>{payerAddress}
+        API->>Horizon: GET /accounts/GPAYER...<br/>(fetch sequence number)
+        Horizon-->>API: Account data
+        API->>API: Build payment XDR:<br/>- Destination: freelancer<br/>- Amount: 100 USDC<br/>- Memo: INV-001<br/>- Timeout: 5 min
+        API-->>Browser: {transactionXdr: "AAAAAgA..."}
+    end
+
+    rect rgb(0, 212, 170, 0.1)
+        Note over Browser,Freighter: Client-Side Signing
+        Browser->>Freighter: Sign transaction<br/>(xdr, network)
+        Freighter->>Freighter: Show TX details to user<br/>"Send 100 USDC to GFREE..."
+        Client->>Freighter: Approve transaction
+        Freighter->>Freighter: Sign with private key<br/>(ed25519, never leaves wallet)
+        Freighter-->>Browser: Signed XDR
+    end
+
+    rect rgb(95, 103, 238, 0.1)
+        Note over Browser,Stellar: Submit to Blockchain
+        Browser->>API: POST /payments/submit<br/>{signedXdr, invoiceId}
+        API->>API: Parse XDR<br/>Validate network matches invoice
+        API->>Horizon: POST /transactions<br/>Submit signed XDR
+        Horizon->>Stellar: Broadcast to validators
+        Stellar->>Stellar: Consensus (3-5 seconds)<br/>- Validate signatures<br/>- Check balances<br/>- Execute payment<br/>- Record in ledger
+        Stellar-->>Horizon: ✓ TX confirmed
+        Horizon-->>API: {hash, ledger, successful: true}
+    end
+
+    API->>DB: UPDATE status = 'PROCESSING'
+    API-->>Browser: {transactionHash: "abc123..."}
+    Browser-->>Client: Payment submitted!<br/>Confirming...
+```
+
+---
+
+### Phase 4: Payment Confirmation (On-Chain → Off-Chain)
+
+```mermaid
+sequenceDiagram
+    participant Watcher as WatcherService<br/>(Polling every 5s)
+    participant DB as PostgreSQL
+    participant Horizon as Horizon API
+    participant Stellar as Stellar Ledger
+
+    loop Every 5 seconds
+        Watcher->>DB: SELECT * FROM invoices<br/>WHERE status IN ('PENDING', 'PROCESSING')
+        DB-->>Watcher: [Invoice list]
+
+        Watcher->>Watcher: Group by wallet + network<br/>"GFREE...:Public Global..." => [invoices]
+
+        loop For each wallet group
+            Watcher->>Horizon: GET /accounts/GFREE.../transactions<br/>?limit=20&order=desc
+            Horizon->>Stellar: Query recent TXs
+            Stellar-->>Horizon: Transaction list
+            Horizon-->>Watcher: [{hash, memo, ...}]
+
+            Watcher->>Watcher: Match by memo<br/>Find TX where memo === "INV-001"
+
+            alt Transaction found
+                Watcher->>DB: Check if already recorded<br/>SELECT FROM payments<br/>WHERE txHash = 'abc123...'
+                DB-->>Watcher: Not found
+
+                Watcher->>Horizon: GET /transactions/abc123...<br/>(Verify details)
+                Horizon->>Stellar: Fetch full TX data
+                Stellar-->>Horizon: Complete transaction
+                Horizon-->>Watcher: {hash, ledger, operations:[...]}
+
+                rect rgb(0, 212, 170, 0.1)
+                    Note over Watcher,DB: Validation
+                    Watcher->>Watcher: ✓ Destination = freelancer wallet
+                    Watcher->>Watcher: ✓ Asset = USDC
+                    Watcher->>Watcher: ✓ Amount >= invoice total
+                end
+
+                rect rgb(95, 103, 238, 0.1)
+                    Note over Watcher,DB: Atomic Update (SERIALIZABLE)
+                    Watcher->>DB: BEGIN TRANSACTION SERIALIZABLE
+                    Watcher->>DB: UPDATE invoices SET<br/>status='PAID',<br/>txHash='abc123...',<br/>ledger=12345678,<br/>payerWallet='GPAYER...',<br/>paidAt='2024-01-15'<br/>WHERE id='inv' AND status!='PAID'
+                    Watcher->>DB: INSERT INTO payments<br/>(invoiceId, txHash, ledger,<br/>fromWallet, toWallet, amount, asset)
+                    Watcher->>DB: INSERT INTO audit_logs<br/>(action: PAID, actorWallet)
+                    Watcher->>DB: COMMIT
+                    DB-->>Watcher: ✓ Transaction committed
+                end
+            end
+        end
+    end
+
+    Note over Watcher,DB: Invoice now PAID with on-chain proof ✓
 
 **Key Points:**
 
